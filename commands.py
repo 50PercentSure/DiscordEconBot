@@ -7,6 +7,279 @@ from datetime import datetime
 import numpy as np
 
 # Existing commands (balance, buy, sell, portfolio, market, profile, chart) remain unchanged
+async def balance(interaction: discord.Interaction, economy):
+    """Check your cash balance and stock value with trend"""
+    user_data = economy.get_user_data(interaction.user.id)
+    if not user_data:
+        await interaction.response.send_message("You're not registered in the system yet. Send a message to get started!", ephemeral=True)
+        return
+        
+    # Calculate trend
+    trend = economy.calculate_trend(interaction.user.id)
+    trend_icon = "📈" if trend > 0 else "📉" if trend < 0 else "➡️"
+    
+    # Predict tomorrow's price
+    predicted_price = economy.predict_future_price(interaction.user.id, 1)
+    prediction_change = predicted_price - user_data['stock_value']
+    prediction_icon = "🔮"
+    
+    embed = discord.Embed(
+        title=f"{interaction.user.display_name}'s Balance",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Cash Balance", value=f"${user_data['cash_balance']:.2f}", inline=True)
+    embed.add_field(name="Stock Value", value=f"${user_data['stock_value']:.2f}", inline=True)
+    embed.add_field(name="Message Count", value=user_data['message_count'], inline=True)
+    embed.add_field(name="7-Day Trend", value=f"{trend_icon} {trend:+.2f}%", inline=True)
+    embed.add_field(name="Tomorrow's Prediction", value=f"{prediction_icon} ${predicted_price:.2f} ({prediction_change:+.2f})", inline=True)
+    
+    await interaction.response.send_message(embed=embed)
+
+async def buy(interaction: discord.Interaction, economy, member: discord.Member, amount: float):
+    """Buy stocks of another user"""
+    if member.id == interaction.user.id:
+        await interaction.response.send_message("You cannot buy your own stocks!", ephemeral=True)
+        return
+        
+    if amount <= 0:
+        await interaction.response.send_message("Amount must be positive!", ephemeral=True)
+        return
+        
+    success, message = economy.buy_stocks(interaction.user.id, member.id, amount)
+    if success:
+        embed = discord.Embed(
+            title="Stock Purchase",
+            description=message,
+            color=discord.Color.green()
+        )
+    else:
+        embed = discord.Embed(
+            title="Purchase Failed",
+            description=message,
+            color=discord.Color.red()
+        )
+    await interaction.response.send_message(embed=embed)
+
+async def sell(interaction: discord.Interaction, economy, member: discord.Member, amount: float):
+    """Sell stocks of another user"""
+    if amount <= 0:
+        await interaction.response.send_message("Amount must be positive!", ephemeral=True)
+        return
+        
+    success, message = economy.sell_stocks(interaction.user.id, member.id, amount)
+    if success:
+        embed = discord.Embed(
+            title="Stock Sale",
+            description=message,
+            color=discord.Color.green()
+        )
+    else:
+        embed = discord.Embed(
+            title="Sale Failed",
+            description=message,
+            color=discord.Color.red()
+        )
+    await interaction.response.send_message(embed=embed)
+
+async def portfolio(interaction: discord.Interaction, economy):
+    """View your investment portfolio with trends"""
+    portfolio = economy.get_portfolio(interaction.user.id)
+    
+    if not portfolio['investments']:
+        await interaction.response.send_message("Your portfolio is empty. Use `/buy` to invest in other users!", ephemeral=True)
+        return
+        
+    embed = discord.Embed(
+        title=f"{interaction.user.display_name}'s Portfolio",
+        color=discord.Color.gold()
+    )
+    
+    for investment in portfolio['investments']:
+        user = await interaction.client.fetch_user(investment['subject_id'])
+        trend_icon = "📈" if investment['trend'] > 0 else "📉" if investment['trend'] < 0 else "➡️"
+        
+        embed.add_field(
+            name=f"{user.display_name} {trend_icon}",
+            value=f"Shares: {investment['shares']:.2f}\n" +
+                  f"Current: ${investment['current_price']:.2f}\n" +
+                  f"Value: ${investment['current_value']:.2f}\n" +
+                  f"P/L: ${investment['profit_loss']:+.2f} ({investment['profit_loss_percent']:+.2f}%)\n" +
+                  f"Trend: {investment['trend']:+.2f}%",
+            inline=True
+        )
+    
+    # Calculate overall portfolio trend (weighted average)
+    total_investment = portfolio['total_investment_value']
+    if total_investment > 0:
+        weighted_trend = sum(inv['trend'] * (inv['current_value'] / total_investment) 
+                           for inv in portfolio['investments'])
+    else:
+        weighted_trend = 0
+        
+    trend_icon = "📈" if weighted_trend > 0 else "📉" if weighted_trend < 0 else "➡️"
+    
+    embed.add_field(
+        name="Summary",
+        value=f"Cash: ${portfolio['cash_balance']:.2f}\n" +
+              f"Investments: ${portfolio['total_investment_value']:.2f}\n" +
+              f"Total: ${portfolio['total_portfolio_value']:.2f}\n" +
+              f"Total P/L: ${portfolio['total_profit_loss']:+.2f} ({portfolio['total_profit_loss_percent']:+.2f}%)\n" +
+              f"Portfolio Trend: {trend_icon} {weighted_trend:+.2f}%",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
+
+async def market(interaction: discord.Interaction, economy, limit: int):
+    """View top users by stock value with trends"""
+    users_cache = economy.users_cache
+    top_users = sorted(
+        users_cache.values(), 
+        key=lambda x: x['stock_value'], 
+        reverse=True
+    )[:limit]
+    
+    embed = discord.Embed(
+        title="Stock Market Leaders",
+        color=discord.Color.purple()
+    )
+    
+    for i, user in enumerate(top_users, 1):
+        discord_user = await interaction.client.fetch_user(user['user_id'])
+        trend = economy.calculate_trend(user['user_id'])
+        trend_icon = "📈" if trend > 0 else "📉" if trend < 0 else "➡️"
+        
+        embed.add_field(
+            name=f"{i}. {discord_user.display_name} {trend_icon}",
+            value=f"Value: ${user['stock_value']:.2f}\n" +
+                  f"Messages: {user['message_count']}\n" +
+                  f"Trend: {trend:+.2f}%",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed)
+
+async def profile(interaction: discord.Interaction, economy, member: discord.Member):
+    """View a user's profile with detailed trend analysis"""
+    target = member or interaction.user
+    user_data = economy.get_user_data(target.id)
+    
+    if not user_data:
+        await interaction.response.send_message("User not found in the system!", ephemeral=True)
+        return
+        
+    # Get number of investors
+    investments = economy.data_handler.get_all_investments()
+    investor_count = sum(1 for inv in investments if inv.get('subject_id') == target.id)
+    
+    # Calculate trends
+    trend_7d = economy.calculate_trend(target.id, 7)
+    trend_30d = economy.calculate_trend(target.id, 30)
+    
+    # Predict future prices
+    tomorrow = economy.predict_future_price(target.id, 1)
+    next_week = economy.predict_future_price(target.id, 7)
+    
+    trend_icon = "📈" if trend_7d > 0 else "📉" if trend_7d < 0 else "➡️"
+    
+    embed = discord.Embed(
+        title=f"{target.display_name}'s Profile {trend_icon}",
+        color=discord.Color.blue()
+    )
+    embed.set_thumbnail(url=target.avatar.url if target.avatar else None)
+    embed.add_field(name="Stock Value", value=f"${user_data['stock_value']:.2f}", inline=True)
+    embed.add_field(name="Message Count", value=user_data['message_count'], inline=True)
+    embed.add_field(name="Investors", value=investor_count, inline=True)
+    embed.add_field(name="7-Day Trend", value=f"{trend_7d:+.2f}%", inline=True)
+    embed.add_field(name="30-Day Trend", value=f"{trend_30d:+.2f}%", inline=True)
+    embed.add_field(name="Tomorrow's Prediction", value=f"${tomorrow:.2f}", inline=True)
+    embed.add_field(name="Next Week Prediction", value=f"${next_week:.2f}", inline=True)
+    embed.add_field(name="Account Created", value=target.created_at.strftime("%Y-%m-%d"), inline=True)
+    
+    await interaction.response.send_message(embed=embed)
+
+async def chart(interaction: discord.Interaction, economy, member: discord.Member, days: int):
+    """View stock performance chart for a user with trend line"""
+    target = member or interaction.user
+    
+    # Validate days parameter
+    if days < 1 or days > 30:
+        await interaction.response.send_message("Please specify a number of days between 1 and 30.", ephemeral=True)
+        return
+    
+    # Get historical data
+    history = economy.data_handler.get_user_history(target.id, days)
+    
+    if not history:
+        await interaction.response.send_message("No historical data available for this user.", ephemeral=True)
+        return
+    
+    # Extract data for plotting
+    dates = [datetime.fromisoformat(record['recorded_at']) for record in history]
+    values = [record['stock_value'] for record in history]
+    
+    # Create the plot
+    plt.figure(figsize=(12, 7))
+    
+    # Plot actual values
+    plt.plot(dates, values, marker='o', linestyle='-', linewidth=2, markersize=4, label='Actual Price')
+    
+    # Add trend line (linear regression)
+    if len(values) > 1:
+        x = np.arange(len(values))
+        z = np.polyfit(x, values, 1)
+        p = np.poly1d(z)
+        plt.plot(dates, p(x), "r--", alpha=0.7, linewidth=1.5, label='Trend Line')
+    
+    # Format the plot
+    plt.title(f"{target.display_name}'s Stock Performance (Last {days} Days)")
+    plt.xlabel("Date")
+    plt.ylabel("Stock Value ($)")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    # Format x-axis to show dates nicely
+    plt.gcf().autofmt_xdate()
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=max(1, days//7)))
+    
+    # Add value labels to some points
+    if len(values) > 5:
+        indices_to_label = [0, len(values)-1]
+        indices_to_label.append(values.index(max(values)))
+        indices_to_label.append(values.index(min(values)))
+        
+        for i in set(indices_to_label):
+            if i < len(values):
+                plt.annotate(f"${values[i]:.2f}", 
+                            (dates[i], values[i]),
+                            textcoords="offset points",
+                            xytext=(0,10),
+                            ha='center')
+    
+    # Save to bytes buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    
+    # Get current stock value for context
+    current_value = economy.get_stock_price(target.id)
+    trend = economy.calculate_trend(target.id, days)
+    trend_icon = "📈" if trend > 0 else "📉" if trend < 0 else "➡️"
+    
+    # Create embed with chart
+    embed = discord.Embed(
+        title=f"{target.display_name}'s Stock Performance {trend_icon}",
+        description=f"Current: ${current_value:.2f} | {days}-Day Trend: {trend:+.2f}%",
+        color=discord.Color.blue()
+    )
+    
+    # Send the chart as a file
+    file = discord.File(buf, filename="stock_chart.png")
+    embed.set_image(url="attachment://stock_chart.png")
+    await interaction.response.send_message(embed=embed, file=file)
+
 
 # Company commands (new)
 async def create_company(interaction: discord.Interaction, economy, name: str, description: str, initial_funds: float):
